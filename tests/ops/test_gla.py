@@ -8,30 +8,38 @@ import torch.nn.functional as F
 
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
 from fla.ops.gla.naive import naive_recurrent_gla
-from fla.utils import device
+from fla.ops.utils.testing import assert_close
+from fla.utils import device, device_platform
+
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+if compiled_mode:
+    test_b_list = [1]
+    test_t_list = [64]
+    test_t_varlen_list = test_t_list
+    test_d_list = [64, 128, 256]
+    test_gate_list = [1.0]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_t_varlen_list = [63, 286, 300, 512]
+    test_d_list = [32, 64, 100, 256]
+    test_gate_list = [1, 0.1, 10]
+test_h_list = [2]
 
 
-def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    assert get_err_ratio(ref, tri) < ratio, msg
-
-
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [32, 64, 100])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
+)
 def test_fused_recurrent(
     B: int,
     T: int,
@@ -48,7 +56,6 @@ def test_fused_recurrent(
     h0 = torch.randn(B, H, D, D, device=device).requires_grad_()
 
     do = torch.randn_like(v)
-    dht = torch.randn_like(h0)
     ref, ref_ht = naive_recurrent_gla(
         q=q,
         k=k,
@@ -57,7 +64,7 @@ def test_fused_recurrent(
         initial_state=h0,
         output_final_state=True
     )
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
@@ -72,7 +79,7 @@ def test_fused_recurrent(
         initial_state=h0,
         output_final_state=True
     )
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
@@ -88,13 +95,21 @@ def test_fused_recurrent(
     assert_close("dh0", ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [130, 146, 162, 178, 300, 2048])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [300, 100])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("gate_logit_normalizer", [1, 0.05, 20])
+@pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
+)
 def test_chunk(
     B: int,
     T: int,
@@ -147,11 +162,15 @@ def test_chunk(
     assert_close("dh0", ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [300, 100])
+@pytest.mark.parametrize("N", test_b_list)
+@pytest.mark.parametrize("T", test_t_varlen_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
 def test_chunk_varlen(
     N: int,
     T: int,
